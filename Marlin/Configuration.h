@@ -962,6 +962,17 @@
       #define BILINEAR_SUBDIVISIONS 3
     #endif
 
+    /** Define 3 points on opposing edges of the grid to probe to determine the plane used to tilt the mesh if it goes out of alignment with the previously probed mesh.
+     * We're primarily expecting tilt along X plane. Pick 2 corners on one side, and a mid-way point on the right side.
+     * There is no particular reason points should form a near-equilateral triangle. Units here are grid indexes (I,J) as opposed to mm!
+     */
+    #define ABL_PROBE_PT_1_I 0
+    #define ABL_PROBE_PT_1_J 0
+    #define ABL_PROBE_PT_2_I 0
+    #define ABL_PROBE_PT_2_J (GRID_MAX_POINTS_Y - 1)
+    #define ABL_PROBE_PT_3_I (GRID_MAX_POINTS_X - 1)
+    #define ABL_PROBE_PT_3_J (GRID_MAX_POINTS_Y / 2)  // halfway, rounded down
+
   #endif
 
 #elif ENABLED(AUTO_BED_LEVELING_3POINT)

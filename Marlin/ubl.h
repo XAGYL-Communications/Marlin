@@ -128,7 +128,7 @@ class unified_bed_leveling {
 
     static float z_values[GRID_MAX_POINTS_X][GRID_MAX_POINTS_Y];
 
-    // 15 is the maximum nubmer of grid points supported + 1 safety margin for now,
+    // 15 is the maximum number of grid points supported + 1 safety margin for now,
     // until determinism prevails
     static constexpr float _mesh_index_to_xpos[16] PROGMEM = {
                               MESH_MIN_X +  0 * (MESH_X_DIST), MESH_MIN_X +  1 * (MESH_X_DIST),

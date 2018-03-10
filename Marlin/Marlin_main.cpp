@@ -4401,6 +4401,8 @@ void home_all_axes() { gcode_G28(true); }
    *  X  X for mesh point, overrides I
    *  Y  Y for mesh point, overrides J
    *  Z  Z for mesh point. Otherwise, raw current Z.
+   *  N  Probe 3 points, use them to calculate current bed plane,
+   *     adjust current mesh grid for any tilt in bed orientation.
    *
    * Without PROBE_MANUALLY:
    *
@@ -4601,6 +4603,14 @@ void home_all_axes() { gcode_G28(true); }
           || no_action
         #endif
       ;
+
+      // Mesh tilt adjustment support (G29 N)
+      #if ENABLED(AUTO_BED_LEVELING_BILINEAR)
+        if (parser.seen('N')) {
+          adjust_mesh_for_current_tilt(verbose_level);
+          return;
+        }
+      #endif
 
       #if ENABLED(AUTO_BED_LEVELING_LINEAR)
 
@@ -5253,6 +5263,250 @@ void home_all_axes() { gcode_G28(true); }
     if (planner.leveling_active)
       SYNC_PLAN_POSITION_KINEMATIC();
   }
+
+
+  #if ENABLED(AUTO_BED_LEVELING_BILINEAR)
+    // Functions for Bilinear Mesh Tilt (G29 N). Based directly off of similar UBL functionality in ubl_G29.cpp
+    FORCE_INLINE float mesh_index_to_xpos(const uint8_t i) {
+      return bilinear_start[X_AXIS] + i * bilinear_grid_spacing[X_AXIS];
+    }
+
+    FORCE_INLINE float mesh_index_to_ypos(const uint8_t j) {
+      return bilinear_start[Y_AXIS] + j * bilinear_grid_spacing[Y_AXIS];
+    }
+
+    void tilt_mesh_based_on_3pts(const float &x1, const float &y1, const float &z1,
+                                 const float &x2, const float &y2, const float &z2,
+                                 const float &x3, const float &y3, const float &z3,
+                                 uint8_t verbose_level) {
+      matrix_3x3 rotation;
+      vector_3 v1 = vector_3( (x1 - x2),
+                              (y1 - y2),
+                              (z1 - z2) ),
+
+               v2 = vector_3( (x3 - x2),
+                              (y3 - y2),
+                              (z3 - z2) ),
+
+               normal = vector_3::cross(v1, v2);
+
+      normal = normal.get_normal();
+
+      /**
+       * This vector is normal to the tilted plane.
+       * However, we don't know its direction. We need it to point up. So if
+       * Z is negative, we need to invert the sign of all components of the vector
+       */
+      if (normal.z < 0.0) {
+        normal.x = -normal.x;
+        normal.y = -normal.y;
+        normal.z = -normal.z;
+      }
+
+      rotation = matrix_3x3::create_look_at(vector_3(normal.x, normal.y, 1));
+
+      if (verbose_level > 2) {
+        SERIAL_ECHOPGM("bed plane normal = [");
+        SERIAL_PROTOCOL_F(normal.x, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(normal.y, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(normal.z, 7);
+        SERIAL_ECHOLNPGM("]");
+        rotation.debug(PSTR("rotation matrix:"));
+      }
+
+      //
+      // All of 3 of these points should give us the same d constant
+      //
+
+      float t = normal.x * x1 + normal.y * y1,
+            d = t + normal.z * z1;
+
+      if (verbose_level > 2) {
+        SERIAL_ECHOPGM("D constant: ");
+        SERIAL_PROTOCOL_F(d, 7);
+        SERIAL_ECHOLNPGM(" ");
+      }
+
+      #if ENABLED(DEBUG_LEVELING_FEATURE)
+        if (DEBUGGING(LEVELING)) {
+          SERIAL_ECHOPGM("d from P1: ");
+          SERIAL_ECHO_F(d, 6);
+          SERIAL_EOL();
+          t = normal.x * x2 + normal.y * y2;
+          d = t + normal.z * z2;
+          SERIAL_ECHOPGM("d from P2: ");
+          SERIAL_ECHO_F(d, 6);
+          SERIAL_EOL();
+          t = normal.x * x3 + normal.y * y3;
+          d = t + normal.z * z3;
+          SERIAL_ECHOPGM("d from P2: ");
+          SERIAL_ECHO_F(d, 6);
+          SERIAL_EOL();
+        }
+      #endif
+
+      // store the old z offset at home position, which may be off-grid, and thus we may need to extrapolate it (requiring EXTRAPOLATE_BEYOND_GRID enabled)
+      float probe_home_pos[XYZ] = { MANUAL_X_HOME_POS + X_PROBE_OFFSET_FROM_EXTRUDER,
+                                    MANUAL_Y_HOME_POS + Y_PROBE_OFFSET_FROM_EXTRUDER,
+                                   -1 };
+      float old_home_z = bilinear_z_offset(probe_home_pos);
+
+      // adjust the mesh grid points for any tilt using the rotation matrix
+      for (uint8_t i = 0; i < GRID_MAX_POINTS_X; i++) {
+        for (uint8_t j = 0; j < GRID_MAX_POINTS_Y; j++) {
+          float x_tmp = mesh_index_to_xpos(i),
+                y_tmp = mesh_index_to_ypos(j),
+                z_tmp = z_values[i][j];
+          #if ENABLED(DEBUG_LEVELING_FEATURE)
+            if (DEBUGGING(LEVELING)) {
+              SERIAL_ECHOPGM("before rotation = [");
+              SERIAL_PROTOCOL_F(x_tmp, 7);
+              SERIAL_PROTOCOLCHAR(',');
+              SERIAL_PROTOCOL_F(y_tmp, 7);
+              SERIAL_PROTOCOLCHAR(',');
+              SERIAL_PROTOCOL_F(z_tmp, 7);
+              SERIAL_ECHOPGM("]   ---> ");
+              safe_delay(20);
+            }
+          #endif
+          apply_rotation_xyz(rotation, x_tmp, y_tmp, z_tmp);
+          #if ENABLED(DEBUG_LEVELING_FEATURE)
+            if (DEBUGGING(LEVELING)) {
+              SERIAL_ECHOPGM("after rotation = [");
+              SERIAL_PROTOCOL_F(x_tmp, 7);
+              SERIAL_PROTOCOLCHAR(',');
+              SERIAL_PROTOCOL_F(y_tmp, 7);
+              SERIAL_PROTOCOLCHAR(',');
+              SERIAL_PROTOCOL_F(z_tmp, 7);
+              SERIAL_ECHOLNPGM("]");
+              safe_delay(55);
+            }
+          #endif
+
+          // NOTE: Replace the z_value, do not add to it!
+          z_values[i][j] = z_tmp - d;
+        }
+      }
+
+      // also recalculate virtual subdivisions, factors, i.e. tilt the virtual mesh points, if they exist
+      refresh_bed_level();
+
+      // obtain the new, post-tilt Z offset at the homing position, calculate change from before
+      float new_home_z = bilinear_z_offset(probe_home_pos, true);   // Force recalculation even though we're checking the same x,y as last time, because the mesh z_values have changed!
+      float delta_home_z = new_home_z - old_home_z;
+
+      #if ENABLED(DEBUG_LEVELING_FEATURE)
+        if (DEBUGGING(LEVELING)) {
+          SERIAL_ECHOPGM("home_z old/new/delta: ");
+          SERIAL_PROTOCOL_F(old_home_z, 7);
+          SERIAL_PROTOCOLCHAR(',');
+          SERIAL_PROTOCOL_F(new_home_z, 7);
+          SERIAL_PROTOCOLCHAR(',');
+          SERIAL_PROTOCOL_F(delta_home_z, 7);
+          SERIAL_ECHOLNPGM("]");
+          safe_delay(55);
+        }
+      #endif
+
+      // raise/lower the entire new mesh by the Z change in the homing position
+      for (uint8_t i = 0; i < GRID_MAX_POINTS_X; i++) {
+        for (uint8_t j = 0; j < GRID_MAX_POINTS_Y; j++) {
+          z_values[i][j] -= delta_home_z;
+        }
+      }
+    }
+
+
+    // Based directly off of the non-grid version of the 'G29 J' command in UBL
+    void adjust_mesh_for_current_tilt(int verbose_level) {
+      if (!leveling_is_valid()) {
+        SERIAL_ERROR_START();
+        SERIAL_ERRORLNPGM("No bilinear grid");
+        return;
+      }
+
+      float x1, x2, x3, y1, y2, y3, z1, z2, z3;
+
+      x1 = mesh_index_to_xpos(ABL_PROBE_PT_1_I);
+      y1 = mesh_index_to_ypos(ABL_PROBE_PT_1_J);
+      x2 = mesh_index_to_xpos(ABL_PROBE_PT_2_I);
+      y2 = mesh_index_to_ypos(ABL_PROBE_PT_2_J);
+      x3 = mesh_index_to_xpos(ABL_PROBE_PT_3_I);
+      y3 = mesh_index_to_ypos(ABL_PROBE_PT_3_J);
+
+      z1 = probe_pt(x1, y1, false, verbose_level);
+      if (!isnan(z1)) {
+        z2 = probe_pt(x2, y2, false, verbose_level);
+        if (!isnan(z2))
+          z3 = probe_pt(x3, y3, true, verbose_level);
+      }
+
+      if (isnan(z1) || isnan(z2) || isnan(z3)) { // probe_pt will return NAN if unreachable
+        SERIAL_ERROR_START();
+        SERIAL_ERRORLNPGM("Attempt to probe off the bed.");
+        return;
+      }
+
+      if (DEBUGGING(MESH_ADJUST)) {
+        SERIAL_ECHOPGM("P1 = [");
+        SERIAL_PROTOCOL_F(x1, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(y1, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(z1, 7);
+        SERIAL_ECHOLNPGM("]");
+        safe_delay(55);
+
+        SERIAL_ECHOPGM("P2 = [");
+        SERIAL_PROTOCOL_F(x2, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(y2, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(z2, 7);
+        SERIAL_ECHOLNPGM("]");
+        safe_delay(55);
+
+        SERIAL_ECHOPGM("P3 = [");
+        SERIAL_PROTOCOL_F(x3, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(y3, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(z3, 7);
+        SERIAL_ECHOLNPGM("]");
+        safe_delay(55);
+      }
+
+      /**
+       * Adjust z1, z2, z3 by the Mesh Height at these points. Just because they're non-zero
+       * doesn't mean the Mesh is tilted! (Compensate each probe point by what the Mesh says
+       * its height is.)
+       * Since in bilinear version we start with I,J, the 3 points are known to already be on the grid, so we can just use z_values[PT_n_I][PT_n_J] instead of calling get_z_correction().
+       */
+      z1 -= z_values[ABL_PROBE_PT_1_I][ABL_PROBE_PT_1_J];
+      z2 -= z_values[ABL_PROBE_PT_2_I][ABL_PROBE_PT_2_J];
+      z3 -= z_values[ABL_PROBE_PT_3_I][ABL_PROBE_PT_3_J];
+
+      if (DEBUGGING(MESH_ADJUST)) {
+        SERIAL_ECHOPGM("After Z Correct = [");
+        SERIAL_PROTOCOL_F(z1, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(z2, 7);
+        SERIAL_PROTOCOLCHAR(',');
+        SERIAL_PROTOCOL_F(z3, 7);
+        SERIAL_ECHOLNPGM("]");
+        safe_delay(55);
+      }
+
+      // move probe to center of bed
+      do_blocking_move_to_xy(0.5 * (GRID_MAX_POINTS_X * bilinear_grid_spacing[X_AXIS] + bilinear_start[X_AXIS]),
+                             0.5 * (GRID_MAX_POINTS_Y * bilinear_grid_spacing[Y_AXIS] + bilinear_start[Y_AXIS]));
+
+      // apply resulting tilt to the mesh
+      tilt_mesh_based_on_3pts(x1, y1, z1, x2, y2, z2, x3, y3, z3, verbose_level);
+    }
+  #endif // BILINEAR
 
 #endif // OLDSCHOOL_ABL
 
@@ -12066,8 +12320,12 @@ void ok_to_send() {
 
 #if ENABLED(AUTO_BED_LEVELING_BILINEAR)
 
-  // Get the Z adjustment for non-linear bed leveling
-  float bilinear_z_offset(const float raw[XYZ]) {
+  /**
+   * Get the Z adjustment for non-linear bed leveling.
+   * Optional force argument, false by default, forces function to recalculate everything even if the X,Y coordinate being checked hasn't changed since the previous call.
+   *   Needed true when we check the exact same X,Y point before & after the mesh grid is tilted and its z_value has changed.
+   */
+  float bilinear_z_offset(const float raw[XYZ], bool force /*=false*/) {
 
     static float z1, d2, z3, d4, L, D, ratio_x, ratio_y,
                  last_x = -999.999, last_y = -999.999;
@@ -12088,7 +12346,7 @@ void ok_to_send() {
       #define FAR_EDGE_OR_BOX 1
     #endif
 
-    if (last_x != rx) {
+    if (force || last_x != rx) {
       last_x = rx;
       ratio_x = rx * ABL_BG_FACTOR(X_AXIS);
       const float gx = constrain(FLOOR(ratio_x), 0, ABL_BG_POINTS_X - FAR_EDGE_OR_BOX);
@@ -12103,7 +12361,7 @@ void ok_to_send() {
       nextx = min(gridx + 1, ABL_BG_POINTS_X - 1);
     }
 
-    if (last_y != ry || last_gridx != gridx) {
+    if (force || last_y != ry || last_gridx != gridx) {
 
       if (last_y != ry) {
         last_y = ry;
@@ -12120,7 +12378,7 @@ void ok_to_send() {
         nexty = min(gridy + 1, ABL_BG_POINTS_Y - 1);
       }
 
-      if (last_gridx != gridx || last_gridy != gridy) {
+      if (force || last_gridx != gridx || last_gridy != gridy) {
         last_gridx = gridx;
         last_gridy = gridy;
         // Z at the box corners

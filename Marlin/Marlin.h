@@ -363,7 +363,8 @@ void report_current_position();
   extern int bilinear_grid_spacing[2], bilinear_start[2];
   extern float bilinear_grid_factor[2],
                z_values[GRID_MAX_POINTS_X][GRID_MAX_POINTS_Y];
-  float bilinear_z_offset(const float raw[XYZ]);
+  float bilinear_z_offset(const float raw[XYZ], bool force=false);
+  void adjust_mesh_for_current_tilt(int verbose_level);
 #endif
 
 #if ENABLED(AUTO_BED_LEVELING_BILINEAR) || ENABLED(MESH_BED_LEVELING)
